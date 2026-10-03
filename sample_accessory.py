@@ -19,7 +19,7 @@ from transformers import pipeline
 
 import torch.nn.functional as F
 
-from data import DataNoReportException, ItemProcessor, MyDataset, read_general
+from data import DataNoReportException, ItemProcessor, MyDataset
 from torchvision import transforms
 
 import models_accessory as models

@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "description": "Pinned official Lumina-Accessory normal checkpoint and official Lumina-Image-2.0 Gemma-2-2B/tokenizer plus FLUX VAE components; no original T2I transformer or EMA.",
+  "repositories": [
+    {
+      "repo_id": "Alpha-VLLM/Lumina-Accessory",
+      "revision": "711d5d6656c62957e8625b02ea53cc74f2c5589d",
+      "target": "Lumina-Accessory",
+      "files": [
+        {
+          "path": "consolidated.00-of-01.pth",
+          "size": 11138404986,
+          "digest_type": "sha256",
+          "digest": "b787a35ab72e8fe14b908e3795c08baa81556dd6b219b0bdc8c495c18386e700",
+          "sha256": "b787a35ab72e8fe14b908e3795c08baa81556dd6b219b0bdc8c495c18386e700"
+        },
+        {
+          "path": "model_args.pth",
+          "size": 2092,
+          "digest_type": "sha256",
+          "digest": "9126ed0f2fd1b365d86557b8b30198bbf721a1634acc1c41a7f9e5953eedb8bc",
+          "sha256": "9126ed0f2fd1b365d86557b8b30198bbf721a1634acc1c41a7f9e5953eedb8bc"
+        }
+      ]
+    },
+    {
+      "repo_id": "Alpha-VLLM/Lumina-Image-2.0",
+      "revision": "53504abd8178b30685b6c4c7a4cd181ff78b73e9",
+      "target": "components",
+      "files": [
+        {
+          "path": "text_encoder/config.json",
+          "size": 852,
+          "digest_type": "git-blob-sha1",
+          "digest": "db14f6ba4fa8e5a06e117c0f5e807ed82a7ed5a8",
+          "sha256": "be4fbb2d6e5f64bf520db805f83eb786573520b619f59a133a5958e3eb4d9900"
+        },
+        {
+          "path": "text_encoder/model-00001-of-00003.safetensors",
+          "size": 4992575568,
+          "digest_type": "sha256",
+          "digest": "d61628bc793240439e608c5ae744f55ec8770f684abb63602648a24cb6da60bc",
+          "sha256": "d61628bc793240439e608c5ae744f55ec8770f684abb63602648a24cb6da60bc"
+        },
+        {
+          "path": "text_encoder/model-00002-of-00003.safetensors",
+          "size": 4983442368,
+          "digest_type": "sha256",
+          "digest": "fbd38d35b33ad210d436cd7e9b13339474e6cb9c533e00d91517e60457cf7dbd",
+          "sha256": "fbd38d35b33ad210d436cd7e9b13339474e6cb9c533e00d91517e60457cf7dbd"
+        },
+        {
+          "path": "text_encoder/model-00003-of-00003.safetensors",
+          "size": 481381280,
+          "digest_type": "sha256",
+          "digest": "e8ea83fa72a2c554b9bd80398d7688a07e48acb354ab64122905b3a6c362b368",
+          "sha256": "e8ea83fa72a2c554b9bd80398d7688a07e48acb354ab64122905b3a6c362b368"
+        },
+        {
+          "path": "text_encoder/model.safetensors.index.json",
+          "size": 22496,
+          "digest_type": "git-blob-sha1",
+          "digest": "5161dbccf08fb25bd4312a106b5479f678105b48",
+          "sha256": "1076c6ab28db3b433cb9e5bbbb0fd6c30f2f0b63d7c7d9723bacdec4833e7562"
+        },
+        {
+          "path": "tokenizer/special_tokens_map.json",
+          "size": 636,
+          "digest_type": "git-blob-sha1",
+          "digest": "8d6368f7e735fbe4781bf6e956b7c6ad0586df80",
+          "sha256": "baec30ea10906f16adb8c18af7a34023002c1746542612b8b41c9f09e1351351"
+        },
+        {
+          "path": "tokenizer/tokenizer.json",
+          "size": 17525357,
+          "digest_type": "sha256",
+          "digest": "3f289bc05132635a8bc7aca7aa21255efd5e18f3710f43e3cdb96bcd41be4922",
+          "sha256": "3f289bc05132635a8bc7aca7aa21255efd5e18f3710f43e3cdb96bcd41be4922"
+        },
+        {
+          "path": "tokenizer/tokenizer.model",
+          "size": 4241003,
+          "digest_type": "sha256",
+          "digest": "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2",
+          "sha256": "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2"
+        },
+        {
+          "path": "tokenizer/tokenizer_config.json",
+          "size": 46379,
+          "digest_type": "git-blob-sha1",
+          "digest": "2357fc1a512dc3881eb99b9df3ef8e97ef7ffd51",
+          "sha256": "bb8245b8d39a065fdf869ee4fce48db9cc491473eb7ff1b41d321fb4caf540d1"
+        },
+        {
+          "path": "vae/config.json",
+          "size": 825,
+          "digest_type": "git-blob-sha1",
+          "digest": "9eaa731f2941de820ce5c466f3719d89dccf6d0e",
+          "sha256": "80c5ed836c7171f6817a8addb910cdd32d30ca65549ba13b75e097c0c30fb326"
+        },
+        {
+          "path": "vae/diffusion_pytorch_model.safetensors",
+          "size": 335306212,
+          "digest_type": "sha256",
+          "digest": "8c717328c8ad41faab2ccfd52ae17332505c6833cf176aad56e7b58f2c4d4c94",
+          "sha256": "8c717328c8ad41faab2ccfd52ae17332505c6833cf176aad56e7b58f2c4d4c94"
+        }
+      ]
+    }
+  ],
+  "static_model_args": {
+    "source_file": "model_args.pth",
+    "sha256": "9126ed0f2fd1b365d86557b8b30198bbf721a1634acc1c41a7f9e5953eedb8bc",
+    "policy": "metadata bytes may be verified; never unpickle this file",
+    "verified_without_unpickle": {
+      "model": "NextDiT_2B_GQA_patch2_Adaln_Refiner",
+      "qk_norm": true,
+      "precision": "bf16",
+      "grad_precision": "fp32",
+      "training_type": "full_model",
+      "caption_dropout_prob": 0.1,
+      "snr_type": "lognorm",
+      "lora_rank": 128,
+      "lora_scale": 1.0,
+      "lr": 1.0,
+      "wd": 0.01
+    }
+  }
+}

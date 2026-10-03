@@ -12,8 +12,11 @@
 import math
 from typing import List, Optional, Tuple
 
-from flash_attn import flash_attn_varlen_func
-from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
+try:
+    from flash_attn import flash_attn_varlen_func
+    from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
+except ImportError:
+    flash_attn_varlen_func = None
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -258,6 +261,8 @@ class JointAttention(nn.Module):
         softmax_scale = math.sqrt(1 / self.head_dim)
 
         if dtype in [torch.float16, torch.bfloat16]:
+            if flash_attn_varlen_func is None:
+                raise RuntimeError("FlashAttention is required for BF16/FP16 Accessory attention")
             # begin var_len flash attn
             (
                 query_states,
@@ -970,8 +975,10 @@ class NextDiT(nn.Module):
                 new_pos_norm = torch.linalg.vector_norm(
                         half_eps, dim=tuple(range(1, len(half_eps.shape))), keepdim=True
                     )
-                if new_pos_norm >= max_new_norm:
-                    half_eps = half_eps * (max_new_norm / new_pos_norm)
+                half_eps = half_eps * torch.minimum(
+                    torch.ones_like(new_pos_norm),
+                    max_new_norm / new_pos_norm.clamp_min(torch.finfo(new_pos_norm.dtype).tiny),
+                )
         else:
             combined = half
             model_out = self.forward(combined, t[:len(x) // 2], cond[:len(x) // 2], cap_feats[:len(x) // 2], cap_mask[:len(x) // 2], position_type[:len(x) // 2])

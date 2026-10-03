@@ -6,8 +6,11 @@ def replace_linear_with_lora(
     module: nn.Module,
     max_rank: int,
     scale: float = 1.0,
+    lora_dtype: torch.dtype | None = None,
 ) -> None:
     for name, child in module.named_children():
+        if isinstance(child, LinearLora):
+            raise ValueError(f"LoRA already injected at {name}")
         if isinstance(child, nn.Linear):
             new_lora = LinearLora(
                 in_features=child.in_features,
@@ -16,6 +19,7 @@ def replace_linear_with_lora(
                 rank=max_rank,
                 scale=scale,
                 dtype=child.weight.dtype,
+                lora_dtype=lora_dtype,
                 device=child.weight.device,
             )
 
@@ -28,6 +32,7 @@ def replace_linear_with_lora(
                 module=child,
                 max_rank=max_rank,
                 scale=scale,
+                lora_dtype=lora_dtype,
             )
 
 
@@ -42,6 +47,7 @@ class LinearLora(nn.Linear):
         device: torch.device,
         lora_bias: bool = True,
         scale: float = 1.0,
+        lora_dtype: torch.dtype | None = None,
         *args,
         **kwargs,
     ) -> None:
@@ -70,14 +76,14 @@ class LinearLora(nn.Linear):
             in_features=in_features,
             out_features=self.rank,
             bias=False,
-            dtype=dtype,
+            dtype=lora_dtype or dtype,
             device=device,
         )
         self.lora_B = nn.Linear(
             in_features=self.rank,
             out_features=out_features,
             bias=self.lora_bias,
-            dtype=dtype,
+            dtype=lora_dtype or dtype,
             device=device,
         )
         
@@ -92,7 +98,7 @@ class LinearLora(nn.Linear):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         base_out = super().forward(input)
 
-        _lora_out_B = self.lora_B(self.lora_A(input))
+        _lora_out_B = self.lora_B(self.lora_A(input.to(self.lora_A.weight.dtype)))
         lora_update = _lora_out_B * self.scale
 
-        return base_out + lora_update
+        return base_out + lora_update.to(base_out.dtype)

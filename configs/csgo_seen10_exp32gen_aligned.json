@@ -1,0 +1,125 @@
+{
+  "experiment": "csgo_seen10_exp32gen_aligned",
+  "display_name": "Lumina-Accessory (based on Lumina-Image-2.0)",
+  "seed": 42,
+  "run_formal": false,
+  "base": {
+    "repo": "Alpha-VLLM/Lumina-Accessory",
+    "revision": "711d5d6656c62957e8625b02ea53cc74f2c5589d",
+    "file": "consolidated.00-of-01.pth",
+    "sha256": "b787a35ab72e8fe14b908e3795c08baa81556dd6b219b0bdc8c495c18386e700",
+    "variant": "normal",
+    "code_revision": "f260ba28dcd76fd6176036e9657de1bce1081a68"
+  },
+  "model": {
+    "name": "NextDiT_2B_GQA_patch2_Adaln_Refiner",
+    "in_channels": 16,
+    "cap_feat_dim": 2304,
+    "qk_norm": true,
+    "position_type": "offset",
+    "precision": "bf16",
+    "vae_scale": 0.3611,
+    "vae_shift": 0.1159,
+    "max_text_length": 256
+  },
+  "lora": {
+    "rank": 128,
+    "scale": 1.0,
+    "dropout": 0.0,
+    "b_bias": true,
+    "parameter_dtype": "float32"
+  },
+  "optimizer": {
+    "name": "Prodigy",
+    "lr": 1.0,
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "eps": 1e-08,
+    "weight_decay": 0.01,
+    "decouple": true,
+    "use_bias_correction": true,
+    "safeguard_warmup": true,
+    "slice_p": 11,
+    "d0": 1e-06,
+    "d_coef": 1.0,
+    "beta3": null,
+    "growth_rate": "inf",
+    "fsdp_in_use": false
+  },
+  "training": {
+    "effective_batch": 128,
+    "max_steps": 19500,
+    "save_steps": [
+      4000,
+      8000,
+      12000,
+      16000,
+      19500
+    ],
+    "scheduler": "constant",
+    "warmup_steps": 0,
+    "gradient_clip": 2.0,
+    "caption_dropout": 0.1,
+    "path_type": "Linear",
+    "prediction": "velocity",
+    "snr_type": "lognorm",
+    "do_shift": true,
+    "seq_len": 784,
+    "activation_checkpointing": true,
+    "validation_seed": 424242,
+    "validation_rng_rule": "sha256_json_seed_index_domain_first8_little64; domains=noise,timestep",
+    "validation_tie_break": "earlier_step",
+    "tf32": true
+  },
+  "sampling": {
+    "sampler": "euler",
+    "num_sampling_steps": 50,
+    "expected_nfe": 49,
+    "cfg_scale": 4.0,
+    "time_shift": 6.0,
+    "renorm_cfg": 1.0,
+    "cfg_trunc": 100.0,
+    "negative_prompt": "",
+    "ode_dtype": "float32"
+  },
+  "data": {
+    "radar_size": 224,
+    "image_size": 448,
+    "resize": "lanczos",
+    "manifest_sha256": "4debad27e0d481d31587a537325d6781247934551a7248885e686ed94046ba47",
+    "calibration_file_sha256": "67436a888e0f79520bf1ab156009f7384b3a1ade7638b44513f31b2a9b6c14ee",
+    "maps": [
+      "cs_agency",
+      "cs_italy",
+      "de_ancient",
+      "de_anubis",
+      "de_dust2",
+      "de_inferno",
+      "de_mirage",
+      "de_nuke",
+      "de_overpass",
+      "de_train"
+    ]
+  },
+  "encoding": {
+    "format": "JPEG",
+    "quality": 75,
+    "optimize": false,
+    "progressive": false,
+    "subsampling": "Pillow_default",
+    "quantization": "round_255_like_UniLIP"
+  },
+  "paths": {
+    "data_root": "../UniLIP/data/csgo_benchmark_v2",
+    "shared_eval_dir": "../csgo_benchmark_v2_eval_general",
+    "model_python": ".venv/bin/python",
+    "eval_python": ".venv-eval/bin/python",
+    "base_checkpoint": "checkpoints/Lumina-Accessory/consolidated.00-of-01.pth",
+    "gemma_path": "checkpoints/components/text_encoder",
+    "tokenizer_path": "checkpoints/components/tokenizer",
+    "vae_path": "checkpoints/components/vae",
+    "run_root": "outputs/csgo_seen10_exp32gen_aligned/Lumina-Accessory/seed_42"
+  }
+}

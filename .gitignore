@@ -1,0 +1,11 @@
+.venv/
+.venv-eval/
+checkpoints/
+outputs/
+__pycache__/
+*.pyc
+.pytest_cache/
+configs/machine.local.json
+.cache/
+.tmp/
+*.egg-info/
