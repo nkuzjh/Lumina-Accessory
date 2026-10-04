@@ -2,6 +2,7 @@ import tempfile
 import json
 from pathlib import Path
 
+import pytest
 import torch
 from PIL import Image
 from torch import nn
@@ -47,8 +48,11 @@ def test_euler_grid_matches_official_torchdiffeq_49_calls():
 class FakeDataset:
     load_targets = False
 
+    def __init__(self, count=2):
+        self.count = count
+
     def __len__(self):
-        return 2
+        return self.count
 
     def __getitem__(self, i):
         return {"sample_id": f"sample{i}", "map": "de_nuke", "file_frame": f"{i:06d}",
@@ -67,8 +71,46 @@ class FakeBundle:
         return torch.zeros(len(texts), 1, 4), torch.ones(len(texts), 1, dtype=torch.bool)
 
 
+class ProgressSpy:
+    def __init__(self, *, total, desc, unit):
+        self.total = total
+        self.desc = desc
+        self.unit = unit
+        self.n = 0
+        self.updates = []
+        self.postfixes = []
+        self.closed = False
+        self.error = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, error_type, error, traceback):
+        self.closed = True
+        self.error = error_type
+
+    def update(self, count):
+        self.n += count
+        self.updates.append(count)
+
+    def set_postfix(self, *, refresh=False, **values):
+        self.postfixes.append(values)
+
+
+def spy_on_progress(monkeypatch):
+    import csgo_seen10.inference as inference
+    bars = []
+
+    def make_progress(**kwargs):
+        bar = ProgressSpy(**kwargs)
+        bars.append(bar)
+        return bar
+
+    monkeypatch.setattr(inference, "tqdm", make_progress)
+    return bars
+
+
 def test_nonfinite_sampling_cannot_become_a_valid_jpeg(monkeypatch):
-    import pytest
     import csgo_seen10.inference as inference
     monkeypatch.setattr(inference, "_guided_velocity", lambda model, state, *a, **kw: torch.full_like(state, float("nan")))
     bundle = FakeBundle()
@@ -80,6 +122,7 @@ def test_nonfinite_sampling_cannot_become_a_valid_jpeg(monkeypatch):
 
 def test_atomic_writer_resume_repair_and_identity(monkeypatch):
     import csgo_seen10.inference as inference
+    bars = spy_on_progress(monkeypatch)
 
     def fake_sample(bundle, noise, feats, mask, radar, **kwargs):
         return torch.zeros(len(noise), 16, 56, 56), 49
@@ -102,12 +145,68 @@ def test_atomic_writer_resume_repair_and_identity(monkeypatch):
         image.write_bytes(b"broken")
         third = run_inference(FakeBundle(), FakeDataset(), root, **kwargs)
         assert third["repaired"] == 1 and third["skipped"] == 1
+        assert [(bar.total, bar.n, bar.postfixes[-1]) for bar in bars] == [
+            (2, 2, {"generated": 2, "skipped": 0, "repaired": 0}),
+            (2, 2, {"generated": 0, "skipped": 2, "repaired": 0}),
+            (2, 2, {"generated": 1, "skipped": 1, "repaired": 1}),
+        ]
+        assert all(bar.closed and bar.desc == "discrete processed" and bar.unit == "image" for bar in bars)
         try:
             run_inference(FakeBundle(), FakeDataset(), root, **(kwargs | {"checkpoint_identity": {"sha256": "other"}}))
         except ValueError as error:
             assert "identity mismatch" in str(error)
         else:
             raise AssertionError("Mixed checkpoint output was accepted")
+
+
+@pytest.mark.parametrize("benchmark_batches,expected,noise_batches", [
+    (2, 4, [2, 2]),
+    (3, 5, [2, 2, 2]),
+])
+def test_compiled_progress_counts_real_rows_and_preserves_tail_padding(
+        monkeypatch, benchmark_batches, expected, noise_batches):
+    import csgo_seen10.inference as inference
+    bars = spy_on_progress(monkeypatch)
+    sampled = []
+
+    def fake_sample(bundle, noise, feats, mask, radar, **kwargs):
+        sampled.append(len(noise))
+        return torch.zeros(len(noise), 16, 56, 56), 49
+
+    monkeypatch.setattr(inference, "build_engine", lambda *args: object())
+    monkeypatch.setattr(inference, "sample_latents", fake_sample)
+    monkeypatch.setattr(inference, "decode_latents", lambda bundle, latents, **kw: torch.zeros(len(latents), 3, 8, 8))
+    cfg = load_config()
+    with tempfile.TemporaryDirectory() as temporary:
+        report = run_inference(FakeBundle(), FakeDataset(5), Path(temporary) / "pred",
+                               task="discrete", checkpoint_identity={"sha256": "abc"}, cfg=cfg,
+                               engine="compiled", batch_size=2, benchmark_batches=benchmark_batches)
+    bar = bars[0]
+    assert report["processed"] == report["generated"] == expected
+    assert bar.total == bar.n == expected and bar.closed
+    assert bar.updates == [2] * (expected // 2) + ([1] if expected % 2 else [])
+    assert bar.postfixes[-1] == {"generated": expected, "skipped": 0, "repaired": 0}
+    assert sampled == noise_batches
+
+
+def test_inference_progress_closes_on_failure_and_empty_dataset(monkeypatch):
+    import csgo_seen10.inference as inference
+    bars = spy_on_progress(monkeypatch)
+    cfg = load_config()
+    kwargs = dict(task="continuous", checkpoint_identity={"sha256": "abc"}, cfg=cfg, batch_size=2)
+    with tempfile.TemporaryDirectory() as temporary:
+        empty = run_inference(FakeBundle(), FakeDataset(0), Path(temporary) / "empty", **kwargs)
+        assert empty["processed"] == 0
+        assert bars[0].total == bars[0].n == 0 and bars[0].closed
+
+        def fail_sample(*args, **kwargs):
+            raise RuntimeError("sampler failed")
+
+        monkeypatch.setattr(inference, "sample_latents", fail_sample)
+        with pytest.raises(RuntimeError, match="sampler failed"):
+            run_inference(FakeBundle(), FakeDataset(3), Path(temporary) / "failed", **kwargs)
+        assert bars[1].total == 3 and bars[1].n == 0
+        assert bars[1].closed and bars[1].error is RuntimeError
 
 
 def test_writer_propagates_async_error():

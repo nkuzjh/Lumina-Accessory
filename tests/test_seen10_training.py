@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import contextlib
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -60,6 +61,30 @@ class TinyBundle:
         keep = (torch.rand(len(prompts), 1) >= caption_dropout).float()
         prediction = self.dit(radar) * keep
         return {"loss": (prediction - target - noise - shift).square().flatten(1).mean(1)}
+
+
+class RecordingTqdm:
+    instances = []
+    messages = []
+
+    def __init__(self, *, total, initial=0, desc, disable=False, **kwargs):
+        self.total, self.initial, self.n = total, initial, initial
+        self.desc, self.disable, self.closed = desc, disable, False
+        self.postfix = None
+        self.instances.append(self)
+
+    def set_postfix(self, **kwargs):
+        self.postfix = kwargs
+
+    def update(self, count):
+        self.n += count
+
+    def close(self):
+        self.closed = True
+
+    @classmethod
+    def write(cls, message, *, file):
+        cls.messages.append((message, file))
 
 
 def _tree_equal(testcase, left, right):
@@ -129,6 +154,32 @@ def _validation_worker(rank, init_file, result_file):
 
 
 class TrainingSemanticsTest(unittest.TestCase):
+    def test_validation_progress_counts_batches_and_closes_on_error(self):
+        class Bundle:
+            def __init__(self):
+                self.dit = torch.nn.Linear(1, 1)
+                self.fail = False
+
+            def training_loss(self, target, radar, prompts, transport, *, caption_dropout):
+                if self.fail and prompts[0] == "pose_2":
+                    raise RuntimeError("validation failed")
+                return {"loss": torch.tensor([int(prompt[5:]) for prompt in prompts], dtype=torch.float32)}
+
+        bundle = Bundle()
+        RecordingTqdm.instances.clear()
+        with patch("csgo_seen10.training.tqdm", RecordingTqdm):
+            loss, count = validate(bundle, TinySeenDataset({}, "seen_train"), SimpleNamespace(),
+                                   rank=0, world=1, micro_batch_size=2, device=torch.device("cpu"), seed=42)
+            self.assertEqual((loss, count), (2.0, 5))
+            self.assertEqual((RecordingTqdm.instances[-1].total, RecordingTqdm.instances[-1].n), (3, 3))
+            self.assertTrue(RecordingTqdm.instances[-1].closed)
+            bundle.fail = True
+            with self.assertRaisesRegex(RuntimeError, "validation failed"):
+                validate(bundle, TinySeenDataset({}, "seen_train"), SimpleNamespace(),
+                         rank=0, world=1, micro_batch_size=2, device=torch.device("cpu"), seed=42)
+            self.assertTrue(RecordingTqdm.instances[-1].closed)
+            self.assertTrue(bundle.dit.training)
+
     def test_fixed_validation_noise_is_sample_stable(self):
         class Transport:
             train_eps = sample_eps = 0.0
@@ -176,6 +227,9 @@ class TrainingSemanticsTest(unittest.TestCase):
             return bundle
 
         with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as stack:
+            RecordingTqdm.instances.clear()
+            RecordingTqdm.messages.clear()
+            stack.enter_context(patch("csgo_seen10.training.tqdm", RecordingTqdm))
             stack.enter_context(patch("csgo_seen10.training.distributed_context",
                                       return_value=(0, 1, torch.device("cpu"))))
             stack.enter_context(patch("csgo_seen10.model.load_bundle", side_effect=bundle_factory))
@@ -199,11 +253,28 @@ class TrainingSemanticsTest(unittest.TestCase):
                          validation_limit=2)
             run_training(cfg, micro_batch_size=2, smoke=True, smoke_steps=2, smoke_limit=5,
                          validation_limit=2, resume="latest")
+            train_bars = [bar for bar in RecordingTqdm.instances if bar.desc == "Training"]
+            self.assertEqual([(bar.initial, bar.total, bar.n) for bar in train_bars],
+                             [(0, 2, 2), (0, 1, 1), (1, 2, 2)])
+            self.assertTrue(all(bar.closed and not bar.disable for bar in train_bars))
+            self.assertIn("loss", train_bars[-1].postfix)
+            self.assertFalse(train_bars[-1].postfix["refresh"])
             resumed_bundle = bundles[-1]
             def events(root):
                 return [json.loads(line) for line in (root / "train/events.jsonl").read_text().splitlines()
                         if json.loads(line).get("event") == "train"]
             full_events, resumed_events = events(full_root), events(resume_root)
+            all_events = [json.loads(line) for line in (resume_root / "train/events.jsonl").read_text().splitlines()]
+            self.assertEqual([row["step"] for row in all_events if row["event"] == "checkpoint"], [1, 2])
+            self.assertEqual([row["path"] for row in all_events if row["event"] == "checkpoint"],
+                             [str(resume_root / "train/checkpoints" / f"step_{step:08d}") for step in (1, 2)])
+            self.assertTrue(all(row["seconds"] >= 0 for row in all_events
+                                if row["event"] in {"validation", "checkpoint"}))
+            self.assertTrue(all(file is sys.stderr for _, file in RecordingTqdm.messages))
+            self.assertTrue(any("Validation step=2 loss=0.5 count=2" in message
+                                for message, _ in RecordingTqdm.messages))
+            self.assertTrue(any(f"Checkpoint step=2 path={resume_root / 'train/checkpoints/step_00000002'}"
+                                in message for message, _ in RecordingTqdm.messages))
             self.assertEqual([r["samples_this_rank"] for r in full_events],
                              [r["samples_this_rank"] for r in resumed_events])
             self.assertEqual([r["loss"] for r in full_events], [r["loss"] for r in resumed_events])
@@ -271,6 +342,57 @@ class TrainingSemanticsTest(unittest.TestCase):
         self.assertEqual(names, list(model.state_dict()))
         model(torch.ones(1, 2)).backward()
         self.assertIsNotNone(model.layers[0].weight.grad)
+
+    def test_progress_closes_on_save_failure_and_nonzero_rank_is_quiet(self):
+        try:
+            import prodigyopt  # noqa: F401
+        except ImportError:
+            self.skipTest("Prodigy is not installed in the current CPU environment")
+        from csgo_seen10.config import load_config
+        from csgo_seen10.training import run_training
+
+        with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as stack:
+            RecordingTqdm.instances.clear()
+            RecordingTqdm.messages.clear()
+            stack.enter_context(patch("csgo_seen10.training.tqdm", RecordingTqdm))
+            rank = stack.enter_context(patch("csgo_seen10.training.distributed_context",
+                                             return_value=(0, 1, torch.device("cpu"))))
+            stack.enter_context(patch("csgo_seen10.model.load_bundle", side_effect=lambda *_a, **_kw: TinyBundle()))
+            stack.enter_context(patch("csgo_seen10.training.Seen10Dataset", TinySeenDataset))
+            stack.enter_context(patch("csgo_seen10.training.protocol_identity",
+                                      return_value={"data_sha256": "tiny-protocol"}))
+            stack.enter_context(patch("csgo_seen10.training.make_transport", return_value=object()))
+            stack.enter_context(patch("csgo_seen10.lora_audit.audit_trainable", return_value={"ok": True}))
+            stack.enter_context(patch("csgo_seen10.training.validate", return_value=(0.5, 2)))
+            stack.enter_context(patch("torch.cuda.is_available", return_value=False))
+            saved = stack.enter_context(patch("csgo_seen10.training.save_checkpoint",
+                                              side_effect=RuntimeError("disk failed")))
+            failed_root = Path(td) / "smoke_failed"
+            cfg = load_config(overrides={"run_root": str(failed_root)})
+            cfg["training"]["effective_batch"] = 4
+            cfg["training"]["activation_checkpointing"] = False
+            with self.assertRaisesRegex(RuntimeError, "disk failed"):
+                run_training(cfg, micro_batch_size=2, smoke=True, smoke_steps=1,
+                             smoke_limit=5, validation_limit=2)
+            saved.assert_called_once()
+            failed_events = [json.loads(line) for line in (failed_root / "train/events.jsonl").read_text().splitlines()]
+            self.assertEqual([row["event"] for row in failed_events], ["train", "validation"])
+            self.assertTrue(RecordingTqdm.instances[-1].closed)
+            self.assertFalse(any(message.startswith("Checkpoint") for message, _ in RecordingTqdm.messages))
+
+            # Isolate the rank output gate without introducing a process group or DDP.
+            rank.return_value = (1, 1, torch.device("cpu"))
+            saved.side_effect = None
+            quiet_root = Path(td) / "smoke_quiet"
+            saved.return_value = quiet_root / "train/checkpoints/step_00000001"
+            cfg["paths"]["run_root"] = str(quiet_root)
+            RecordingTqdm.messages.clear()
+            run_training(cfg, micro_batch_size=2, smoke=True, smoke_steps=1,
+                         smoke_limit=5, validation_limit=2)
+            self.assertTrue(RecordingTqdm.instances[-1].disable)
+            self.assertTrue(RecordingTqdm.instances[-1].closed)
+            self.assertEqual(RecordingTqdm.messages, [])
+            self.assertFalse((quiet_root / "train/events.jsonl").exists())
 
     def test_batch_contract_and_epoch_crossing(self):
         self.assertEqual(batch_configuration(2, 4, None, 128), 16)

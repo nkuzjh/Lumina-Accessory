@@ -80,14 +80,63 @@ if [[ -z "$PYTHON_BIN" ]]; then
   exit 1
 fi
 
-if [[ ! -x .venv/bin/python ]]; then
-  if ! "$PYTHON_BIN" -m venv .venv 2>/dev/null; then
-    if python3 -m virtualenv --version >/dev/null 2>&1; then
-      python3 -m virtualenv --clear --python "$PYTHON_BIN" .venv
-    else
-      echo "venv/ensurepip is unavailable. Install python3-venv or virtualenv and rerun." >&2
+VENV_DIR="$PROJECT_ROOT/.venv"
+VENV_PYTHON="$VENV_DIR/bin/python"
+if [[ ! -x "$VENV_PYTHON" ]]; then
+  if [[ -e "$VENV_DIR" ]]; then
+    echo "Existing .venv has no executable bin/python; repair or move it before rerunning." >&2
+    exit 1
+  fi
+  if ! "$PYTHON_BIN" -m venv "$VENV_DIR" 2>/dev/null && [[ ! -x "$VENV_PYTHON" ]]; then
+    if ! "$PYTHON_BIN" -m venv --without-pip "$VENV_DIR" 2>/dev/null; then
+      echo "Could not create .venv with $PYTHON_BIN. Install its matching venv package or provide a working Python 3.11/3.12 via CSGO_PYTHON_BIN." >&2
       exit 1
     fi
+  fi
+fi
+
+if ! "$VENV_PYTHON" - "$VENV_DIR" <<'PY'
+from pathlib import Path
+import sys
+
+expected = Path(sys.argv[1]).resolve()
+if Path(sys.prefix).resolve() != expected or sys.prefix == sys.base_prefix:
+    sys.exit(f".venv/bin/python does not belong to {expected}; refusing to install into another environment")
+if sys.version_info[:2] not in ((3, 11), (3, 12)):
+    sys.exit(f".venv requires Python 3.11 or 3.12, found {sys.version_info.major}.{sys.version_info.minor}")
+PY
+then
+  exit 1
+fi
+
+if ! "$VENV_PYTHON" -m pip --version >/dev/null 2>&1; then
+  "$VENV_PYTHON" -m ensurepip --upgrade >/dev/null 2>&1 || true
+fi
+if ! "$VENV_PYTHON" -m pip --version >/dev/null 2>&1; then
+  if [[ -n "${CSGO_BOOTSTRAP_PYTHON:-}" ]]; then
+    BOOTSTRAP_CANDIDATES=("$CSGO_BOOTSTRAP_PYTHON")
+  else
+    BOOTSTRAP_CANDIDATES=(python3 python "$PYTHON_BIN")
+  fi
+  BOOTSTRAP_PYTHON=""
+  for candidate in "${BOOTSTRAP_CANDIDATES[@]}"; do
+    if ! command -v "$candidate" >/dev/null 2>&1; then continue; fi
+    if "$candidate" -c 'import pip, re, sys; v = re.match(r"^(\d+)\.(\d+)", pip.__version__); sys.exit(0 if v and tuple(map(int, v.groups())) >= (22, 3) else 1)' >/dev/null 2>&1; then
+      BOOTSTRAP_PYTHON="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$BOOTSTRAP_PYTHON" ]]; then
+    echo "No pip >=22.3 is available to bootstrap .venv. Install the matching Python venv package or set CSGO_BOOTSTRAP_PYTHON to a Python with pip >=22.3, then rerun." >&2
+    exit 1
+  fi
+  if ! "$BOOTSTRAP_PYTHON" -m pip --python "$VENV_DIR" install 'pip==25.3'; then
+    echo "Could not bootstrap pip into .venv with $BOOTSTRAP_PYTHON; .venv was kept for retry." >&2
+    exit 1
+  fi
+  if ! "$VENV_PYTHON" -m pip --version >/dev/null 2>&1; then
+    echo "Bootstrap returned successfully but .venv/bin/python still has no pip." >&2
+    exit 1
   fi
 fi
 

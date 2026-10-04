@@ -17,6 +17,7 @@ from typing import Any
 
 import torch
 from PIL import Image
+from tqdm.auto import tqdm
 
 from .config import atomic_json, code_identity, content_hash, scientific_config
 from .fast_inference import build_engine, prepare_condition
@@ -247,7 +248,8 @@ def run_inference(bundle, dataset, output_root: str | Path, *, task: str, checkp
     started = time.perf_counter()
     if bundle.device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(bundle.device)
-    with AtomicJpegWriter(quality=cfg["encoding"]["quality"]) as writer:
+    with tqdm(total=limit, desc=f"{task} processed", unit="image") as progress, \
+            AtomicJpegWriter(quality=cfg["encoding"]["quality"]) as writer:
         for start in range(0, limit, batch_size):
             batch_started = time.perf_counter()
             batch = [dataset[i] for i in range(start, min(start + batch_size, limit))]
@@ -257,6 +259,8 @@ def run_inference(bundle, dataset, output_root: str | Path, *, task: str, checkp
             pending = [(row, path) for row, path, okay in zip(batch, paths, valid) if not okay]
             repaired += sum(path.exists() for _, path in pending)
             if not pending:
+                progress.set_postfix(generated=generated, skipped=skipped, repaired=repaired, refresh=False)
+                progress.update(len(batch))
                 continue
             rows, paths = zip(*pending)
             # Compile a constant CFG batch shape, even after resume or at the tail.
@@ -286,6 +290,8 @@ def run_inference(bundle, dataset, output_root: str | Path, *, task: str, checkp
                 torch.cuda.synchronize(bundle.device)
             batch_times.append({"batch_index": start // batch_size, "real_samples": actual_count,
                                 "seconds": time.perf_counter() - batch_started})
+            progress.set_postfix(generated=generated, skipped=skipped, repaired=repaired, refresh=False)
+            progress.update(len(batch))
     elapsed = time.perf_counter() - started
     report = {"generated": generated, "skipped": skipped, "repaired": repaired,
             "processed": limit, "nfe_per_image": cfg["sampling"]["expected_nfe"], "output_root": str(root),

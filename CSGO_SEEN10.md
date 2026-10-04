@@ -6,28 +6,51 @@
 
 ## 环境与官方资产
 
+两台服务器的项目位置和数据布局不同，因此 `cd` 和 `DATA_ROOT` 不同。迁移服务器的旧 UniLIP 数据入口包含指向目录外的图片、雷达软链接，需使用真实完整 bundle 根目录，避免共享协议报 `escapes data root`。选择对应服务器的整段命令，在同一终端执行。
+
+### 原服务器
+
 ```bash
+set -euo pipefail
 cd /home/jiahao/task/Lumina-Accessory
 export EXP=csgo_seen10_exp32gen_aligned
 export DATA_ROOT=/home/jiahao/task/UniLIP/data/csgo_benchmark_v2
-export SHARED_EVAL_DIR=/home/jiahao/task/csgo_benchmark_v2_eval_general
-export EVAL_PYTHON="$SHARED_EVAL_DIR/.venv/bin/python"
+export SHARED_EVAL_DIR="$PWD/../csgo_benchmark_v2_eval_general"
 export MODEL_PYTHON="$PWD/.venv/bin/python"
+export EVAL_PYTHON="$SHARED_EVAL_DIR/.venv/bin/python"
 export RUN_ROOT="$PWD/outputs/$EXP/Lumina-Accessory/seed_42"
 
+# 仅安装项目环境，不启动正式任务。
 bash scripts/setup_csgo_seen10.sh --env-only
+
+# 下载或补齐固定版本的官方资产；路径未覆盖时使用项目默认 checkpoints 布局。
 "$MODEL_PYTHON" scripts/download_csgo_seen10_assets.py --experiment "$EXP"
-"$MODEL_PYTHON" scripts/download_csgo_seen10_assets.py --experiment "$EXP" --check --json
+
+# 完整 check 会遍历全部 split，并对模型资产做完整哈希；不会启动训练。
 bash scripts/run_csgo_seen10.sh check --experiment "$EXP"
 ```
 
-环境与资产分开。`.venv`由Python创建，全新安装，不克隆旧环境。当前服务器为Blackwell；环境profile和实际锁定依赖、FlashAttention wheel SHA见setup脚本及environment审计。其他GPU按脚本的显式profile/版本覆盖配置，未知组合先验算子，不能把当前组合当所有服务器的保证。
+### 迁移服务器
 
-setup也检查编译所需Python头文件。本机缺少系统开发头文件，脚本从Ubuntu签名apt索引取得与系统Python精确匹配的`libpython3.12-dev`，校验SHA256后仅解包到`.venv/python_headers`；项目环境的`.pth`钩子为子进程设置CPATH。它不安装全局包、不借用旧项目环境。其他系统优先使用已安装的匹配头文件，也可设置`CSGO_PYTHON_HEADERS`指向独立取得的匹配include树；原始出处/hash见`outputs/implementation_audit/environment_python_headers.json`。
+```bash
+set -euo pipefail
+cd /data/jiahao/task/Lumina-Accessory
+export EXP=csgo_seen10_exp32gen_aligned
+export DATA_ROOT=/data/jiahao/data/csgo_benchmark_v2
+export SHARED_EVAL_DIR="$PWD/../csgo_benchmark_v2_eval_general"
+export MODEL_PYTHON="$PWD/.venv/bin/python"
+export EVAL_PYTHON="$SHARED_EVAL_DIR/.venv/bin/python"
+export RUN_ROOT="$PWD/outputs/$EXP/Lumina-Accessory/seed_42"
 
-默认Blackwell profile使用仓库内`requirements-csgo-seen10-cu128.lock.txt`约束全部81个已验证依赖，FlashAttention二进制还另验wheel SHA。`custom` profile不强套此硬件环境锁，可用`CSGO_CONSTRAINTS_FILE`指定该机器独立验证的约束文件。
+# 仅安装项目环境，不启动正式任务。
+bash scripts/setup_csgo_seen10.sh --env-only
 
-资产清单 `scripts/csgo_seen10_assets.json` 固定每个文件revision、大小、SHA256。默认normal主权重、静态metadata、官方分发Gemma2-2B/tokenizer与FLUX VAE，不下载EMA/T2I transformer。metadata只做zip/pickletools静态检查，不执行发布pickle。支持断点传输与离线完整hash检查。不要把未完成分块文件当权重；重复执行已校验资产不重新下载。用户已有HF登录或HF_TOKEN可用，不将token写入文档/日志；若出现访问限制，在HF网页完成相应授权后重试，不在聊天中提交token。
+# 下载或补齐固定版本的官方资产；路径未覆盖时使用项目默认 checkpoints 布局。
+"$MODEL_PYTHON" scripts/download_csgo_seen10_assets.py --experiment "$EXP"
+
+# 完整 check 会遍历全部 split，并对模型资产做完整哈希；不会启动训练。
+bash scripts/run_csgo_seen10.sh check --experiment "$EXP"
+```
 
 ## 输入和科学配置
 
@@ -91,9 +114,9 @@ CUDA_VISIBLE_DEVICES=0 bash scripts/run_csgo_seen10.sh train --experiment "$EXP"
 
 # 仅用于有两张可用卡的服务器：2×4×16=128。
 CUDA_VISIBLE_DEVICES=0,1 bash scripts/run_csgo_seen10.sh train --experiment "$EXP" --seed 42 \
-  --nproc-per-node 2 --micro-batch-size 4 --gradient-accumulation-steps 16
+  --nproc-per-node 2 --micro-batch-size 32 --gradient-accumulation-steps 2
 CUDA_VISIBLE_DEVICES=0,1 bash scripts/run_csgo_seen10.sh train --experiment "$EXP" --seed 42 \
-  --nproc-per-node 2 --micro-batch-size 4 --gradient-accumulation-steps 16 --resume latest
+  --nproc-per-node 2 --micro-batch-size 32 --gradient-accumulation-steps 2 --resume latest
 ```
 
 其他合法组合：1×4×32、4×4×8、8×4×4。省略accum时从实际world×micro推导；不能整除128即失败。不按world扩大LR。全局样本流跨epoch连续，不使用drop_last或DistributedSampler补齐。完整checkpoint保存LoRA（含B bias）、Prodigy、scheduler、所有rank RNG、全局offset、曝光、选择结果、身份与payload SHA256。恢复同软硬件/同拓扑用相同RNG；改变合法并行组合保留预算和样本流，但明确不保证逐位相同。从更早checkpoint分支恢复用新的 `--run-root`。
@@ -192,7 +215,7 @@ outputs/csgo_seen10_exp32gen_aligned/Lumina-Accessory/seed_42/
 2. 独立执行官方资产下载，或复制上述清单中的文件后执行 `--check`。官方组件能从固定发布源独立获取，不需要旧Lumina工程。无需下载T2I主权重、EMA或其他模型。
 3. 准备完整Benchmark v2数据bundle：manifest、minimal report、splits、calibration、radars、images；保持内容不变，设置DATA_ROOT。不能扫描GT重建split或重算calibration。
 4. 准备只读共享evaluator及其独立兼容环境/指标资产；设置SHARED_EVAL_DIR/EVAL_PYTHON。公共目录已有环境时只读复用。安装新评测环境/下载指标资产应使用新机的独立路径和共享evaluator提供的接口，不改公共算法。
-5. 路径优先级为CLI > 环境变量 > `configs/machine.local.json` > 项目相对默认；相对路径按项目解析。可覆盖DATA_ROOT、SHARED_EVAL_DIR、MODEL_PYTHON、EVAL_PYTHON、OFFICIAL_BASE_CHECKPOINT、GEMMA_PATH、TOKENIZER_PATH、VAE_PATH、RUN_ROOT。机器路径不进入科学hash。
+5. 路径优先级为CLI > 环境变量 > `configs/machine.local.json` > 项目相对默认；相对路径按项目解析。可覆盖DATA_ROOT、SHARED_EVAL_DIR、MODEL_PYTHON、EVAL_PYTHON、OFFICIAL_BASE_CHECKPOINT、GEMMA_PATH、TOKENIZER_PATH、VAE_PATH、RUN_ROOT。环境变量会覆盖机器配置；机器路径不进入科学hash。
 6. 运行check/CPU smoke/GPU小规模补测后再手动正式训练。改变GPU数量只允许合法乘积128，checkpoint会记录拓扑改变导致的非逐位恢复。没有可用GPU时不能占用他人训练资源。
 
 新机源码还原示例（在源码包与校验文件所在目录执行，目标目录尚不存在）：

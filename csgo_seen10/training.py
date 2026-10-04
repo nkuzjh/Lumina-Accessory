@@ -17,6 +17,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from tqdm import tqdm
 
 from .checkpoint import MILESTONES, checkpoint_metadata, load_checkpoint, resolve_checkpoint, save_checkpoint
 from .config import PROJECT_ROOT, atomic_json, batch_configuration, code_identity
@@ -157,8 +158,11 @@ def validate(bundle, dataset, transport, *, rank, world, micro_batch_size, devic
     was_training = bundle.dit.training
     bundle.dit.eval()
     total = torch.zeros(2, dtype=torch.float64, device=device)
+    progress = None
     try:
         indices = list(range(rank, len(dataset), world))
+        progress = tqdm(total=math.ceil(len(indices) / micro_batch_size), desc="Validation (rank 0 shard)",
+                        unit="batch", leave=False, disable=rank != 0)
         for start in range(0, len(indices), micro_batch_size):
             subset = indices[start:start + micro_batch_size]
             batch = collate_samples([dataset[i] for i in subset])
@@ -168,12 +172,15 @@ def validate(bundle, dataset, transport, *, rank, world, micro_batch_size, devic
             if losses.numel() != len(subset):
                 raise ValueError("Validation loss is not per sample")
             total += torch.stack((losses.sum(), torch.tensor(len(subset), device=device, dtype=torch.float64)))
+            progress.update(1)
         if world > 1:
             dist.all_reduce(total)
         if int(total[1].item()) != len(dataset):
             raise AssertionError(f"Validation counted {total[1].item()} of {len(dataset)} source records")
         return float((total[0] / total[1]).item()), int(total[1].item())
     finally:
+        if progress is not None:
+            progress.close()
         bundle.dit.train(was_training)
         bundle.dit = wrapped
 
@@ -328,58 +335,77 @@ def run_training(cfg, *, micro_batch_size, gradient_accumulation_steps=None,
         raise ValueError("Aligned training budget or milestones changed")
     if start_step >= limit:
         return {"step": start_step, "status": "already_complete"}
-    for step_index in range(start_step, limit):
-        started = time.monotonic()
-        if device.type == "cuda":
-            torch.cuda.reset_peak_memory_stats(device)
-        optimizer.zero_grad(set_to_none=True)
-        local_sum = torch.zeros((), dtype=torch.float64, device=device)
-        ids = []
-        for micro_index in range(accumulation):
-            indices = stream.micro_indices(step_index, rank, world, micro_batch_size, accumulation, micro_index)
-            batch = collate_samples([train_set[i] for i in indices])
-            ids.extend(batch["sample_id"])
-            sync = micro_index == accumulation - 1
-            context = contextlib.nullcontext() if sync or world == 1 else bundle.dit.no_sync()
-            with context:
-                loss_vector = bundle.training_loss(batch["target"], batch["radar"], batch["prompt"], transport,
-                                                   caption_dropout=recipe["caption_dropout"])["loss"]
-                if loss_vector.numel() != micro_batch_size or not torch.isfinite(loss_vector).all():
-                    raise FloatingPointError("Nonfinite or incorrectly sized training loss")
-                local_sum += loss_vector.detach().double().sum()
-                (loss_vector.float().sum() / (micro_batch_size * accumulation)).backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_((p for p in raw_model.parameters() if p.requires_grad),
-                                                   float(recipe["gradient_clip"]))
-        if not torch.isfinite(grad_norm):
-            raise FloatingPointError("Nonfinite LoRA gradient norm")
-        optimizer.step()
-        scheduler.step()
-        step = step_index + 1
-        exposures = step * effective
-        if world > 1:
-            dist.all_reduce(local_sum)
-        event = {"event": "train", "step": step, "exposures": exposures,
-                 "loss": float((local_sum / effective).item()), "grad_norm": float(grad_norm),
-                 "lr": optimizer.param_groups[0]["lr"],
-                 "prodigy_d": (float(optimizer.param_groups[0]["d"])
-                               if "d" in optimizer.param_groups[0] else None),
-                 "effective_lr": (float(optimizer.param_groups[0]["lr"] * optimizer.param_groups[0]["d"])
-                                  if "d" in optimizer.param_groups[0] else None),
-                 "seconds": time.monotonic() - started,
-                 "samples_this_rank": ids if smoke else None,
-                 "peak_cuda_bytes": torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None}
-        event["samples_per_second"] = effective / event["seconds"]
-        if rank == 0:
-            _append_log(root / "train/events.jsonl", event)
-        if (smoke and step == limit) or (not smoke and step in MILESTONES):
-            validation_loss, validation_count = validate(bundle, val_set, transport, rank=rank, world=world,
-                                                         micro_batch_size=micro_batch_size, device=device,
-                                                         seed=recipe["validation_seed"])
+    progress = tqdm(total=limit, initial=start_step, desc="Training", unit="step", disable=rank != 0)
+    try:
+        for step_index in range(start_step, limit):
+            started = time.monotonic()
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(device)
+            optimizer.zero_grad(set_to_none=True)
+            local_sum = torch.zeros((), dtype=torch.float64, device=device)
+            ids = []
+            for micro_index in range(accumulation):
+                indices = stream.micro_indices(step_index, rank, world, micro_batch_size, accumulation, micro_index)
+                batch = collate_samples([train_set[i] for i in indices])
+                ids.extend(batch["sample_id"])
+                sync = micro_index == accumulation - 1
+                context = contextlib.nullcontext() if sync or world == 1 else bundle.dit.no_sync()
+                with context:
+                    loss_vector = bundle.training_loss(batch["target"], batch["radar"], batch["prompt"], transport,
+                                                       caption_dropout=recipe["caption_dropout"])["loss"]
+                    if loss_vector.numel() != micro_batch_size or not torch.isfinite(loss_vector).all():
+                        raise FloatingPointError("Nonfinite or incorrectly sized training loss")
+                    local_sum += loss_vector.detach().double().sum()
+                    (loss_vector.float().sum() / (micro_batch_size * accumulation)).backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_((p for p in raw_model.parameters() if p.requires_grad),
+                                                       float(recipe["gradient_clip"]))
+            if not torch.isfinite(grad_norm):
+                raise FloatingPointError("Nonfinite LoRA gradient norm")
+            optimizer.step()
+            scheduler.step()
+            step = step_index + 1
+            exposures = step * effective
+            if world > 1:
+                dist.all_reduce(local_sum)
+            event = {"event": "train", "step": step, "exposures": exposures,
+                     "loss": float((local_sum / effective).item()), "grad_norm": float(grad_norm),
+                     "lr": optimizer.param_groups[0]["lr"],
+                     "prodigy_d": (float(optimizer.param_groups[0]["d"])
+                                   if "d" in optimizer.param_groups[0] else None),
+                     "effective_lr": (float(optimizer.param_groups[0]["lr"] * optimizer.param_groups[0]["d"])
+                                      if "d" in optimizer.param_groups[0] else None),
+                     "seconds": time.monotonic() - started,
+                     "samples_this_rank": ids if smoke else None,
+                     "peak_cuda_bytes": torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None}
+            event["samples_per_second"] = effective / event["seconds"]
             if rank == 0:
-                _append_log(root / "train/events.jsonl", {"event": "validation", "step": step,
-                            "loss": validation_loss, "count": validation_count,
-                            "validation_seed": recipe["validation_seed"]})
-            save_checkpoint(ckpt_root, model=raw_model, optimizer=optimizer, scheduler=scheduler,
-                            step=step, exposures=exposures, sampler_state=stream.state_after(step),
-                            identity=identity, topology=topology, validation_loss=validation_loss, smoke=smoke)
+                _append_log(root / "train/events.jsonl", event)
+                progress.set_postfix(loss=f"{event['loss']:.4g}", grad=f"{event['grad_norm']:.4g}",
+                                     lr=f"{event['lr']:.3g}", refresh=False)
+            progress.update(1)
+            if (smoke and step == limit) or (not smoke and step in MILESTONES):
+                validation_started = time.monotonic()
+                validation_loss, validation_count = validate(bundle, val_set, transport, rank=rank, world=world,
+                                                             micro_batch_size=micro_batch_size, device=device,
+                                                             seed=recipe["validation_seed"])
+                validation_seconds = time.monotonic() - validation_started
+                if rank == 0:
+                    _append_log(root / "train/events.jsonl", {"event": "validation", "step": step,
+                                "loss": validation_loss, "count": validation_count,
+                                "validation_seed": recipe["validation_seed"], "seconds": validation_seconds})
+                    tqdm.write(f"Validation step={step} loss={validation_loss:.6g} count={validation_count} "
+                               f"seconds={validation_seconds:.1f}", file=sys.stderr)
+                save_started = time.monotonic()
+                saved_path = save_checkpoint(ckpt_root, model=raw_model, optimizer=optimizer, scheduler=scheduler,
+                                             step=step, exposures=exposures, sampler_state=stream.state_after(step),
+                                             identity=identity, topology=topology, validation_loss=validation_loss,
+                                             smoke=smoke)
+                save_seconds = time.monotonic() - save_started
+                if rank == 0:
+                    _append_log(root / "train/events.jsonl", {"event": "checkpoint", "step": step,
+                                "path": str(saved_path), "seconds": save_seconds})
+                    tqdm.write(f"Checkpoint step={step} path={saved_path} seconds={save_seconds:.1f}",
+                               file=sys.stderr)
+    finally:
+        progress.close()
     return {"step": limit, "exposures": limit * effective, "checkpoint_root": str(ckpt_root)}
